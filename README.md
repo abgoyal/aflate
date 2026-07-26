@@ -93,6 +93,12 @@ is exact). Measured over 4000 adversarial synthetic frequency tables this costs
 matters when the 15-bit limit binds, which does not happen for DEFLATE's
 alphabets in practice.
 
+## Integrating
+
+If you are wiring this into pdfmill (or instructing an agent to), read
+**`PDFMILL.md`** — it covers level choice, pooling strategy under GC, the
+per-writer memory budget, and the measured dead ends worth not re-deriving.
+
 ## Licence
 
 BSD-3-Clause, inherited from klauspost/compress and the Go standard library.
