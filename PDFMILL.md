@@ -177,7 +177,71 @@ trigger point, making collections less frequent.
 What actually hurts is the opposite pattern — many small short-lived
 allocations. Spend effort there, not on shrinking the writer pool.
 
-### 6. Do not let the destination allocate
+### 6. Fix the output-buffer pre-grow in `compressDataPooled`
+
+`internal/pdf/writer.go` currently does:
+
+```go
+estimatedSize := len(data) * 7 / 10 // 70% estimate
+if estimatedSize > cap(buf.data) {
+    buf.data = make([]byte, 0, estimatedSize)   // discards the pooled buffer
+}
+```
+
+Two problems, both measured on pdfmill's own streams:
+
+- **The 70% estimate is 4.1x too high.** Actual compressed output is **17.2%**
+  of input for content streams (median across all stream kinds: 17.5%).
+- When the estimate exceeds the pooled buffer's capacity the code **throws away
+  the pooled buffer and allocates a fresh one** — which is strictly worse than
+  letting `append` grow it, because the pooled one is discarded either way and
+  the allocation is larger than needed.
+
+With the 70% estimate, **32 of 2378 streams discard their pooled buffer; only
+6 actually need more space.** Five out of six of those reallocations are pure
+waste.
+
+**Fix: delete the pre-grow entirely.**
+
+```go
+buf := getSliceBuffer()
+zw := getZlibWriter()
+zw.Reset(buf)
+```
+
+The pooled buffer already covers **99.75%** of streams at its current size, and
+`append` handles the remainder correctly. If you would rather keep an explicit
+hint, base it on measured output — `len(data)/4` — not 70%.
+
+### 7. Reduce `sliceBufferInitialSize`
+
+Measured output sizes across 2378 real streams:
+
+| buffer size | streams needing to grow |
+|---|---|
+| 4 KiB | 28 (1.18%) |
+| **8 KiB** | **11 (0.46%)** |
+| 16 KiB (current) | 6 (0.25%) |
+
+`sliceBufferInitialSize = 8192` is the right value: it halves the buffer pool
+for an extra 0.2% growth rate.
+
+Be proportionate about this one, though. The buffer pool is 8 x 16 KiB =
+128 KiB total, so halving it saves 64 KiB. **Rule 4 (BlockSize) saves ~3.9 MiB
+on the same pool of 8 writers** — sixty times more. Do rule 4 first; treat this
+as tidying.
+
+### 8. Skip compression for very small streams
+
+93% of pdfmill's Form XObjects (median **31 bytes**) would get *larger* if
+deflated — a zlib header plus a block header exceeds the payload. pdfmill
+already leaves them uncompressed, which is correct; **do not "fix" that.**
+
+Generalise it instead: below roughly **150 bytes**, skip compression and write
+the stream raw. It is smaller, and it costs no CPU at all.
+
+### 9. Do not let the destination allocate
+
 
 aflate writes into whatever `io.Writer` you hand `Reset`. If that is a
 `bytes.Buffer` that grows from zero, you have moved the allocation rather than

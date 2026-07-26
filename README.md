@@ -115,9 +115,16 @@ w, err := flate.NewWriterOptions(dst, 5, flate.Options{BlockSize: 16 << 10})
 
 ## Integrating
 
-If you are wiring this into pdfmill (or instructing an agent to), read
-**`PDFMILL.md`** — it covers level choice, pooling strategy under GC, the
-per-writer memory budget, and the measured dead ends worth not re-deriving.
+Three documents, in reading order:
+
+- **`AGENT_BRIEF.md`** — start here. Background on what was actually wrong,
+  what to change and in what order, what is already correct, and the measured
+  dead ends. Written to be handed to an agent working on the generator.
+- **`PDFMILL.md`** — the integration rules: level choice, pooling under GC,
+  `Options.BlockSize`, and the fixes to pdfmill's own compression buffers.
+- **`ENGINE_RECOMMENDATIONS.md`** — the generator-side changes, which are worth
+  more than the codec: cross-page Form XObject hoisting and emitter verbosity
+  together measure −55.8% deflate CPU and −41.4% output bytes.
 
 ## Licence
 
