@@ -16,6 +16,36 @@ type fastEnc interface {
 	Reset()
 }
 
+// newFastEncSized builds a fast encoder whose history buffer is sized for
+// blockSize rather than the default. The buffer must hold a full window plus
+// one block, and must not fall below two windows (addBlock's move-down
+// invariant), so tiny values are clamped up.
+func newFastEncSized(level, blockSize int) fastEnc {
+	e := newFastEnc(level)
+	if blockSize <= 0 || blockSize >= maxStoreBlockSize {
+		return e
+	}
+	n := maxMatchOffset + int32(blockSize)
+	if n < maxMatchOffset*2 {
+		n = maxMatchOffset * 2
+	}
+	switch v := e.(type) {
+	case *fastEncL1:
+		v.histSize = n
+	case *fastEncL2:
+		v.histSize = n
+	case *fastEncL3:
+		v.histSize = n
+	case *fastEncL4:
+		v.histSize = n
+	case *fastEncL5:
+		v.histSize = n
+	case *fastEncL6:
+		v.histSize = n
+	}
+	return e
+}
+
 func newFastEnc(level int) fastEnc {
 	switch level {
 	case 1:
@@ -76,13 +106,19 @@ type tableEntry struct {
 type fastGen struct {
 	hist []byte
 	cur  int32
+	// histSize overrides allocHistory when non-zero; see newFastEncSized.
+	histSize int32
 }
 
 func (e *fastGen) addBlock(src []byte) int32 {
 	// check if we have space already
 	if len(e.hist)+len(src) > cap(e.hist) {
 		if cap(e.hist) == 0 {
-			e.hist = make([]byte, 0, allocHistory)
+			want := allocHistory
+			if e.histSize > 0 {
+				want = int(e.histSize)
+			}
+			e.hist = make([]byte, 0, want)
 		} else {
 			if cap(e.hist) < maxMatchOffset*2 {
 				panic("unexpected buffer size")
@@ -177,8 +213,12 @@ func (e *fastGen) matchlenLong(s, t int, src []byte) int32 {
 
 // Reset the encoding table.
 func (e *fastGen) Reset() {
-	if cap(e.hist) < allocHistory {
-		e.hist = make([]byte, 0, allocHistory)
+	want := allocHistory
+	if e.histSize > 0 {
+		want = int(e.histSize)
+	}
+	if cap(e.hist) < want {
+		e.hist = make([]byte, 0, want)
 	}
 	// We offset current position so everything will be out of reach.
 	// If we are above the buffer reset it will be cleared anyway since len(hist) == 0.

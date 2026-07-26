@@ -93,6 +93,26 @@ is exact). Measured over 4000 adversarial synthetic frequency tables this costs
 matters when the 15-bit limit binds, which does not happen for DEFLATE's
 alphabets in practice.
 
+## Sizing the writer
+
+`NewWriterOptions` caps the block size, which sizes the staging window and the
+token buffer — together more than half a writer's footprint. Streams smaller
+than `BlockSize` are unaffected.
+
+```go
+w, err := flate.NewWriterOptions(dst, 5, flate.Options{BlockSize: 16 << 10})
+```
+
+| BlockSize | KiB/writer | content streams | font streams |
+|---|---|---|---|
+| default (64 KiB) | 1048 | — | — |
+| 32 KiB | 640 | +0.4% speed, −0.00% ratio | +8.9% speed, −0.02% ratio |
+| **16 KiB** | **560** | **+0.5% speed, +0.01% ratio** | +8.6% speed, −0.07% ratio |
+| 8 KiB | 520 | −7.2% speed, −0.76% ratio | +5.6% speed, −0.29% ratio |
+
+16 KiB is the knee: memory is nearly halved at no cost, and larger streams get
+*faster* from better cache locality. Below it the ratio cost becomes real.
+
 ## Integrating
 
 If you are wiring this into pdfmill (or instructing an agent to), read

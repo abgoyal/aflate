@@ -133,10 +133,32 @@ type tokens struct {
 	litHist   [256]uint16 // codes 0->255
 	nFilled   int
 	n         uint16 // Must be able to contain maxStoreBlockSize
-	tokens    [maxStoreBlockSize + 1]token
+	tokens    []token
+}
+
+// init sizes the token buffer. n is the largest number of tokens a single
+// block can produce, which equals the compressor's block size in bytes (one
+// token per byte in the worst case). A zero-value tokens lazily takes the
+// full size, so callers that never call init behave exactly as before.
+func (t *tokens) init(n int) {
+	if n <= 0 || n > maxStoreBlockSize {
+		n = maxStoreBlockSize
+	}
+	if cap(t.tokens) < n+1 {
+		t.tokens = make([]token, n+1)
+	}
+	t.tokens = t.tokens[:n+1]
+}
+
+// ensure guarantees the buffer exists before the first write.
+func (t *tokens) ensure() {
+	if t.tokens == nil {
+		t.init(maxStoreBlockSize)
+	}
 }
 
 func (t *tokens) Reset() {
+	t.ensure()
 	if t.n == 0 {
 		return
 	}

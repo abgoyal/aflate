@@ -120,9 +120,10 @@ type compressor struct {
 	err        error
 
 	// queued output tokens
-	tokens tokens
-	fast   fastEnc
-	state  *advancedState
+	tokens    tokens
+	fast      fastEnc
+	state     *advancedState
+	blockSize int
 
 	sync          bool // requesting flush
 	byteAvailable bool // if true, still need to process window[index-1].
@@ -681,7 +682,10 @@ func (d *compressor) deflateLazy() {
 }
 
 func (d *compressor) store() {
-	if d.windowEnd > 0 && (d.windowEnd == maxStoreBlockSize || d.sync) {
+	// Compare against the actual window length, not the default constant: a
+	// Writer built with a smaller Options.BlockSize would otherwise never
+	// reach the threshold and never emit a block.
+	if d.windowEnd > 0 && (d.windowEnd == len(d.window) || d.sync) {
 		d.err = d.writeStoredBlock(d.window[:d.windowEnd])
 		d.windowEnd = 0
 	}
@@ -785,16 +789,31 @@ func (d *compressor) syncFlush() error {
 }
 
 func (d *compressor) init(w io.Writer, level int) (err error) {
+	return d.initSized(w, level, 0)
+}
+
+// initSized is init with an explicit block size. blockSize caps how much input
+// is gathered before a block is emitted; it sizes both the staging window and
+// the token buffer, which together dominate a writer's memory. Zero selects
+// the default (maxStoreBlockSize).
+//
+// Inputs larger than blockSize are split across more blocks, which costs a
+// little ratio; inputs smaller than it are unaffected.
+func (d *compressor) initSized(w io.Writer, level int, blockSize int) (err error) {
 	d.w = newHuffmanBitWriter(w)
+	if blockSize <= 0 || blockSize > maxStoreBlockSize {
+		blockSize = maxStoreBlockSize
+	}
+	d.blockSize = blockSize
 
 	switch {
 	case level == NoCompression:
-		d.window = make([]byte, maxStoreBlockSize)
+		d.window = make([]byte, blockSize)
 		d.fill = (*compressor).fillBlock
 		d.step = (*compressor).store
 	case level == ConstantCompression:
 		d.w.logNewTablePenalty = 10
-		d.window = make([]byte, 32<<10)
+		d.window = make([]byte, min(blockSize, 32<<10))
 		d.fill = (*compressor).fillBlock
 		d.step = (*compressor).storeHuff
 	case level == DefaultCompression:
@@ -802,8 +821,8 @@ func (d *compressor) init(w io.Writer, level int) (err error) {
 		fallthrough
 	case level >= 1 && level <= 6:
 		d.w.logNewTablePenalty = 7
-		d.fast = newFastEnc(level)
-		d.window = make([]byte, maxStoreBlockSize)
+		d.fast = newFastEncSized(level, blockSize)
+		d.window = make([]byte, blockSize)
 		d.fill = (*compressor).fillBlock
 		d.step = (*compressor).storeFast
 	case 7 <= level && level <= 9:
@@ -816,13 +835,21 @@ func (d *compressor) init(w io.Writer, level int) (err error) {
 	case -level >= MinCustomWindowSize && -level <= MaxCustomWindowSize:
 		d.w.logNewTablePenalty = 7
 		d.fast = &fastEncL5Window{maxOffset: int32(-level), cur: maxStoreBlockSize}
-		d.window = make([]byte, maxStoreBlockSize)
+		d.window = make([]byte, blockSize)
 		d.fill = (*compressor).fillBlock
 		d.step = (*compressor).storeFast
 	default:
 		return fmt.Errorf("flate: invalid compression level %d: want value in range [-2, 9]", level)
 	}
 	d.level = level
+	// One token per input byte is the worst case for the fast levels, which
+	// encode a whole window at a time. Levels 7-9 stream through a fixed
+	// window and are bounded by maxFlateBlockTokens instead.
+	if level >= 7 && level <= 9 {
+		d.tokens.init(maxFlateBlockTokens)
+	} else {
+		d.tokens.init(len(d.window))
+	}
 	return nil
 }
 

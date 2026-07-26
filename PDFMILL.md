@@ -103,9 +103,49 @@ func (p *writerPool) put(w *flate.Writer) {
 **Bound it.** Size the channel to your worker count (typically `GOMAXPROCS`),
 not unbounded — each entry is ~1 MiB of resident memory.
 
-### 4. Budget ~1.05 MiB per live writer, and know that the GC does not care
+### 4. Size the writer to your streams — this is the memory lever
+
+`flate.NewWriterOptions` lets you cap the block size, which sizes both the
+staging window and the token buffer. A default writer is built for 64 KiB
+blocks; pdfmill's page content streams have a **median of 6.3 KiB and a
+measured maximum of 17.9 KiB**, and the largest block ever observed produced
+**2026 tokens against a 65536-entry buffer** — 32x oversized.
+
+```go
+w, err := flate.NewWriterOptions(dst, 5, flate.Options{
+    BlockSize: 16 << 10,   // or flate.SuggestBlockSize(yourP99StreamSize)
+})
+```
+
+Measured, per writer:
+
+| BlockSize | KiB/writer | change |
+|---|---|---|
+| default (64 KiB) | 1048 | — |
+| 32 KiB | 640 | **−38.9%** |
+| **16 KiB** | **560** | **−46.6%** |
+| 8 KiB | 520 | −50.4% |
+
+And it is not a tradeoff at 16 KiB — it is free:
+
+| BlockSize | content streams | font streams |
+|---|---|---|
+| 32 KiB | +0.4% speed, −0.00% ratio | +8.9% speed, −0.02% ratio |
+| **16 KiB** | **+0.5% speed, +0.01% ratio** | **+8.6% speed, −0.07% ratio** |
+| 8 KiB | −7.2% speed, −0.76% ratio | +5.6% speed, −0.29% ratio |
+
+Smaller blocks improve cache locality, which is why fonts (113 KiB streams,
+split into more blocks) actually get *faster*. **16 KiB is the knee — do not go
+below it**; at 8 KiB the ratio cost becomes real.
+
+Use `BlockSize: 16 << 10`. That alone takes 8 pooled writers from ~8.4 MiB to
+~4.5 MiB with no measurable cost.
+
+### 5. Budget for the writers, and know that the GC does not care
 
 Per-writer footprint by level:
+
+Default `BlockSize`, per level:
 
 | level | KiB |
 |---|---|
@@ -116,7 +156,8 @@ Per-writer footprint by level:
 | L9 | 1130 |
 
 It breaks down as ~262 KiB token array, ~320 KiB history buffer, ~384 KiB hash
-tables, ~85 KiB other. aflate adds 4.4 KiB (+0.4%) over klauspost.
+tables, ~85 KiB other. Rule 4 removes most of the first two. aflate adds
+4.4 KiB (+0.4%) over klauspost.
 
 **The important part:** these structures are pointer-free, so Go allocates them
 into noscan spans and the collector never traverses them. Measured marginal GC
@@ -136,7 +177,7 @@ trigger point, making collections less frequent.
 What actually hurts is the opposite pattern — many small short-lived
 allocations. Spend effort there, not on shrinking the writer pool.
 
-### 5. Do not let the destination allocate
+### 6. Do not let the destination allocate
 
 aflate writes into whatever `io.Writer` you hand `Reset`. If that is a
 `bytes.Buffer` that grows from zero, you have moved the allocation rather than
@@ -144,21 +185,28 @@ removed it. Either write straight to the file/socket, or pool pre-sized
 buffers. A page content stream compresses to roughly 1–2 KiB, so a 4 KiB
 pre-sized buffer covers almost all of them without regrowth.
 
-## Two knobs if peak RSS becomes the binding constraint
+## If peak RSS is still the binding constraint
 
-Both are one-line constants in `flate/`, both measured, neither is on by
-default because the right choice depends on stream sizes.
+`Options.BlockSize` (rule 4) is the supported lever and should be used first:
+it takes an L5 writer to 560 KiB for free.
 
-- `allocHistory` in `fast_encoder.go`, `maxStoreBlockSize * 5` → `* 2`:
-  saves **192 KiB per writer**. Free (slightly positive) for streams under
-  ~64 KiB, costs ~3.5% at L1 on multi-megabyte streams. pdfmill's streams are
-  ~5 KiB, so this is close to free.
-- `tableBits` in `fast_encoder.go`, `15` → `14`: saves another **192 KiB** at
-  L5/L6 for −0.2% speed and −0.06% ratio.
+Beyond that there is one more, an unexported constant rather than an option
+because it changes fixed-size arrays: `tableBits` in `flate/fast_encoder.go`,
+`15` → `14`, halves the hash tables.
 
-Together these take an L5 writer from ~1062 KiB to ~680 KiB. Do not go below
-`tableBits = 14`; 11–13 were measured and are worse on **both** speed and
-ratio.
+Measured with **both** (`BlockSize: 16 << 10` and `tableBits = 14`), against
+stock klauspost defaults:
+
+| | KiB/writer | speed | ratio |
+|---|---|---|---|
+| stock default | 1048 | 168.5 MB/s | 5.6638 |
+| BlockSize 16 KiB | 560 | 169.4 MB/s | 5.6641 |
+| **+ tableBits 14** | **368** | **171.5 MB/s** | 5.6618 |
+
+**−65% memory and +1.8% speed for −0.04% ratio.**
+
+Do not go below `tableBits = 14`; 11–13 were measured and are worse on **both**
+speed and ratio.
 
 ## Runtime settings
 
