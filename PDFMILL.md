@@ -17,6 +17,11 @@ import "github.com/abgoyal/aflate/flate"
 w, err := flate.NewWriter(dst, 5)
 ```
 
+pdfmill's `FlateDecode` streams are zlib-wrapped, so its call sites take
+`github.com/abgoyal/aflate/zlib`, not `flate` directly: `zlib.NewWriter(dst, 5)`,
+then `Reset`, `Write` and `Close` per stream. `zlib.NewWriter` builds the encoder at once,
+so a pool of them should grow on demand rather than be filled at startup.
+
 Measured on 854 real pdfmill page content streams (median 6.3 KB):
 
 | level | klauspost | aflate | speed | ratio |
@@ -138,8 +143,23 @@ Smaller blocks improve cache locality, which is why fonts (113 KiB streams,
 split into more blocks) actually get *faster*. **16 KiB is the knee — do not go
 below it**; at 8 KiB the ratio cost becomes real.
 
-Use `BlockSize: 16 << 10`. That alone takes 8 pooled writers from ~8.4 MiB to
-~4.5 MiB with no measurable cost.
+**But not for images, so pdfmill keeps the default.** Those measurements cover
+page content and fonts. Each block carries its own Huffman header, and a large
+image of flat colour compresses so well that the extra headers are a real
+share of it. The 200x200 logo in pdfmill's own invoice, offer-letter,
+statement and qr-demo templates (120,000 bytes of raw RGB) compresses at level
+5 to:
+
+| BlockSize | bytes | vs default |
+|---|---|---|
+| default (64 KiB) | 3159 | — |
+| 32 KiB | 3240 | +2.6% |
+| 16 KiB | 3377 | **+6.9%** |
+
+At 16 KiB every document carrying that logo grew by about 2%, while
+the rest of the corpus shrank by a few bytes. The saving is ~0.5 MiB per
+writer, and with a pool that fills on demand that is one writer in the CLI or
+the wasm worker. It does not pay for making every emailed invoice larger.
 
 ### 5. Budget for the writers, and know that the GC does not care
 
@@ -227,9 +247,7 @@ Measured output sizes across 2378 real streams:
 for an extra 0.2% growth rate.
 
 Be proportionate about this one, though. The buffer pool is 8 x 16 KiB =
-128 KiB total, so halving it saves 64 KiB. **Rule 4 (BlockSize) saves ~3.9 MiB
-on the same pool of 8 writers** — sixty times more. Do rule 4 first; treat this
-as tidying.
+128 KiB total, so halving it saves 64 KiB. Treat it as tidying.
 
 ### 8. Skip compression for very small streams
 
@@ -251,8 +269,9 @@ pre-sized buffer covers almost all of them without regrowth.
 
 ## If peak RSS is still the binding constraint
 
-`Options.BlockSize` (rule 4) is the supported lever and should be used first:
-it takes an L5 writer to 560 KiB for free.
+`Options.BlockSize` (rule 4) is the supported lever: it takes an L5 writer to
+560 KiB, free on page content and fonts but not on large flat images, which is
+why pdfmill does not use it.
 
 Beyond that there is one more, an unexported constant rather than an option
 because it changes fixed-size arrays: `tableBits` in `flate/fast_encoder.go`,

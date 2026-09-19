@@ -16,6 +16,10 @@ sed -i 's|github.com/klauspost/compress/internal/le|github.com/abgoyal/aflate/in
 git rebase   # reapply the two patches
 ```
 
+`zlib/` is not synced: it is this fork's own package, written for a PDF
+writer's needs rather than copied from upstream's `zlib`, so a sync leaves it
+alone.
+
 Files this fork owns (expect conflicts only here):
 
 | file | change |

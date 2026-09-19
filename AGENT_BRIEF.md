@@ -44,15 +44,20 @@ flushing, and an optional cross-stream header cache.
 | L5 | 119.3 MB/s | 171.2 MB/s | **+44%** | 5.748 → 5.742 |
 | L6 | 108.8 MB/s | 150.8 MB/s | **+39%** | 5.848 → 5.843 |
 
-Plus a new `Options.BlockSize` that cuts per-writer memory **47% for free**.
+Plus a new `Options.BlockSize` that cuts per-writer memory **47%**, free on
+page content and fonts but not on large flat images (PDFMILL.md rule 4), which
+is why pdfmill does not use it.
 
 **Your integration tasks are in `aflate/PDFMILL.md`, rules 1–9.** Summary:
 
 1. **Use level 5**, never 7–9 (L9 costs 8× L5's CPU for 7% fewer bytes).
 2. One writer per worker goroutine; `Reset` per stream (11 ns vs 32 µs to build).
 3. Keep the existing channel pool — pdfmill already got this right.
-4. **`Options{BlockSize: 16 << 10}`** — 1048 → 560 KiB per writer, free.
-5. Budget ~560 KiB per live writer; the GC barely notices them (pointer-free).
+4. **Keep the default block size.** `Options{BlockSize: 16 << 10}` takes a
+   writer from 1048 to 560 KiB for free on content and fonts, but makes a flat
+   embedded logo 6.9% larger (PDFMILL.md rule 4).
+5. Budget ~1 MiB per live writer at the default block size; the GC barely
+   notices them (pointer-free).
 6. **Delete the 70% pre-grow** in `compressDataPooled` — real ratio is 17.2%.
 7. `sliceBufferInitialSize` 16384 → 8192 (minor).
 8. **Skip compression below ~150 bytes** (small streams get bigger, not smaller).
@@ -208,8 +213,8 @@ net 40 bytes *smaller*).
 
 ## 8. Suggested order of work
 
-1. **Swap in aflate and set `BlockSize: 16 << 10`** — an afternoon, +39% encode
-   throughput and −47% writer memory.
+1. **Swap in aflate (`aflate/zlib`, default block size)** — an afternoon, +39% encode
+   throughput.
 2. **Level 5 everywhere**; remove any 7–9 defaults.
 3. **The `compressDataPooled` fixes** (rules 6–8) — small, safe, quick.
 4. **Form XObjects for cross-page blocks** (3a) — the biggest single win,

@@ -93,6 +93,36 @@ is exact). Measured over 4000 adversarial synthetic frequency tables this costs
 matters when the 15-bit limit binds, which does not happen for DEFLATE's
 alphabets in practice.
 
+## zlib
+
+PDF's `FlateDecode` is zlib-wrapped (RFC 1950: a two-byte header, the DEFLATE
+stream, an Adler-32 trailer), so a PDF writer wants `zlib`, not raw `flate`.
+`github.com/abgoyal/aflate/zlib` provides that framing and nothing else a PDF
+writer does not use:
+
+```go
+import "github.com/abgoyal/aflate/zlib"
+
+w, err := zlib.NewWriter(dst, 5)
+// per stream:
+w.Reset(dst)
+w.Write(content)
+w.Close()
+```
+
+- `NewWriter` builds the encoder at once, so it is the expensive call; keep
+  the Writer and `Reset` it per stream. A kept Writer compresses a stream with
+  **zero allocations**, and a test holds it to that.
+- No preset dictionaries (a PDF reader cannot be given one), no `Flush`.
+- `NewReader` takes a `flate.Reader` (an `io.Reader` that is also an
+  `io.ByteReader`, as `*bytes.Reader` is), so it never wraps its input in a
+  buffer of its own. It rejects a stream that asks for a dictionary.
+
+Its output is round-tripped through the standard library's `compress/zlib`
+reader at every level, its header is
+checked against the standard library's writer, and its reader decodes the
+standard library's output.
+
 ## Sizing the writer
 
 `NewWriterOptions` caps the block size, which sizes the staging window and the
@@ -110,8 +140,23 @@ w, err := flate.NewWriterOptions(dst, 5, flate.Options{BlockSize: 16 << 10})
 | **16 KiB** | **560** | **+0.5% speed, +0.01% ratio** | +8.6% speed, −0.07% ratio |
 | 8 KiB | 520 | −7.2% speed, −0.76% ratio | +5.6% speed, −0.29% ratio |
 
-16 KiB is the knee: memory is nearly halved at no cost, and larger streams get
-*faster* from better cache locality. Below it the ratio cost becomes real.
+16 KiB is the knee for page content and fonts: memory is nearly halved at no
+cost, and larger streams get *faster* from better cache locality. Below it the
+ratio cost becomes real.
+
+**It is not free for a large, highly compressible stream.** Each block carries
+its own Huffman header, and when a whole block compresses to a few hundred
+bytes that header is a real share of it. A 200x200 flat-colour logo (120,000
+bytes of raw RGB) compresses at level 5 to:
+
+| BlockSize | bytes | vs default |
+|---|---|---|
+| default (64 KiB) | 3159 | — |
+| 32 KiB | 3240 | +2.6% |
+| 16 KiB | 3377 | **+6.9%** |
+
+pdfmill embeds exactly such images, so it keeps the default block size; and so
+`zlib.NewWriter` takes no options.
 
 ## Integrating
 

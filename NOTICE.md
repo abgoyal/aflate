@@ -23,6 +23,10 @@ apply to the code in this repository are:
 (zstd, s2 and their dependencies) that are **not** vendored here. It is kept
 whole rather than trimmed, so nothing is accidentally dropped.
 
+`zlib/` follows the Go standard library's `compress/zlib` (**Copyright (c)
+2009 The Go Authors**, BSD-3-Clause) for the RFC 1950 framing, cut down to what
+a PDF writer uses.
+
 ## Added code
 
 `flate/huffman_fast.go` and the Huffman-related changes in `flate/huffman_code.go`
